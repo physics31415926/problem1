@@ -15,11 +15,10 @@
 
 # Load packages
 import numpy as np
+import math
 import torch
-import torch.nn as nn
-import torch.optim as optim
 
-class Agent(nn.Module):
+class Agent(object):
     ''' Base agent class, used as a parent class
 
         Args:
@@ -29,66 +28,23 @@ class Agent(nn.Module):
             n_actions (int): where we store the number of actions
             last_action (int): last action taken by the agent
     '''
-    def __init__(self, n_states, n_actions: int):
-        self.n_states = n_states
+    def __init__(self, n_actions: int):
         self.n_actions = n_actions
         self.last_action = None
-        super().__init__()
 
-        # Create input layer with ReLU activation
-        self.input_layer = nn.Linear(n_states, 128)
-        self.input_layer_activation = nn.ReLU()
-
-        # Create output layer
-        self.output_layer = nn.Linear(128, n_actions)
-
-    def forward(self, x):
+    def forward(self, state: np.ndarray):
         ''' Performs a forward computation '''
-        # Function used to compute the forward pass
+        pass
 
-        # Compute first layer
-        l1 = self.input_layer(x)
-        l1 = self.input_layer_activation(l1)
-
-        # Compute output layer
-        out = self.output_layer(l1)
-        return out
-
-    def backward(self, buffer, optimizer, targetNet, discount_factor, batchNumber):
+    def backward(self):
         ''' Performs a backward pass on the network '''
-        # Sample a batch of 3 elements
-        states, actions, rewards, next_states, dones = buffer.sample_batch(batchNumber)
-
-        # Training process, set gradients to 0
-        optimizer.zero_grad()
-
-        # Compute output of the network given the states batch
-        values = torch.zeros(batchNumber)
-        valuesTarget = torch.zeros(batchNumber)
-        for i in range(batchNumber):
-            values[i] = self(torch.tensor(states[i], requires_grad=True, dtype=torch.float32))[actions[i]]
-            if dones[i]:
-                valuesTarget[i] = rewards[i]
-            else:
-                valuesTarget[i] = discount_factor * targetNet(torch.tensor(next_states[i], requires_grad=True, dtype=torch.float32)).max() + rewards[i]
-        # Compute loss function
-        loss = nn.functional.mse_loss(values,valuesTarget)
-        #print(loss)
-
-        # Compute gradient
-        loss.backward()
-
-        # Clip gradient norm to 1
-        nn.utils.clip_grad_norm_(self.parameters(), max_norm=0.5)
-
-        # Perform backward pass (backpropagation)
-        optimizer.step()
+        pass
 
 
 class RandomAgent(Agent):
     ''' Agent taking actions uniformly at random, child of the class Agent'''
-    def __init__(self, n_states, n_actions: int):
-        super(RandomAgent, self).__init__(n_states, n_actions)
+    def __init__(self, n_actions: int):
+        super(RandomAgent, self).__init__(n_actions)
 
     def forward(self, state: np.ndarray) -> int:
         ''' Compute an action uniformly at random across n_actions possible
@@ -99,3 +55,35 @@ class RandomAgent(Agent):
         '''
         self.last_action = np.random.randint(0, self.n_actions)
         return self.last_action
+
+class EpsGreedyAgent(Agent):
+
+    EPS_START = 0.99
+    EPS_END = 0.05
+    ''' Agent taking actions with epsilon greedy policy, child of the class Agent'''
+    def __init__(self, n_actions: int, n_episodes: int, policy_net):
+        super(EpsGreedyAgent, self).__init__(n_actions)
+        self.EPS_DECAY = int(n_episodes*0.9)
+        self.steps_done = 0
+        self.policy_net = policy_net
+
+    def forward(self, state: np.ndarray, episode) -> int:
+        ''' Compute an action uniformly at random across n_actions possible
+            choices
+
+            Returns:
+                action (int): the random action
+        '''
+        sample = np.random.random()
+        eps_decayed = self.EPS_START - (self.EPS_START-self.EPS_END)*(episode-1) / (self.EPS_DECAY - 1)
+        eps_threshold = np.max([self.EPS_END, eps_decayed])
+        self.steps_done += 1
+        if sample > eps_threshold:
+            with torch.no_grad():
+                # t.max(1) will return largest column value of each row.
+                # second column on max result is index of where max element was
+                # found, so we pick action with the larger expected reward.
+                return self.policy_net(state.unsqueeze(0)).max(1).indices.view(1, 1)
+        else:
+            return torch.tensor([[np.random.randint(0, self.n_actions)]], dtype=torch.long)
+

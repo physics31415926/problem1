@@ -13,19 +13,18 @@
 # Last update: 6th October 2020, by alessior@kth.se
 #
 
-# Load packages
 import numpy as np
 import gym
 import torch
+from torch import nn
 import matplotlib.pyplot as plt
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D
 from tqdm import trange
-from DQN_agent import RandomAgent
-from DQN_agent import Agent
-from collections import deque, namedtuple
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from copy import deepcopy
+from DQN_agent import RandomAgent, EpsGreedyAgent
+import random
+from collections import namedtuple
+
 
 def running_average(x, N):
     ''' Function used to compute the running average
@@ -33,55 +32,10 @@ def running_average(x, N):
     '''
     if len(x) >= N:
         y = np.copy(x)
-        y[N - 1:] = np.convolve(x, np.ones((N,)) / N, mode='valid')
+        y[N-1:] = np.convolve(x, np.ones((N, )) / N, mode='valid')
     else:
         y = np.zeros_like(x)
     return y
-
-
-class ExperienceReplayBuffer(object):
-    """ Class used to store a buffer containing experiences of the RL agent.
-    """
-
-    def __init__(self, maximum_length):
-        # Create buffer of maximum length
-        self.buffer = deque(maxlen=maximum_length)
-
-    def append(self, experience):
-        # Append experience to the buffer
-        self.buffer.append(experience)
-
-    def __len__(self):
-        # overload len operator
-        return len(self.buffer)
-
-    def sample_batch(self, n):
-        """ Function used to sample experiences from the buffer.
-            returns 5 lists, each of size n. Returns a list of state, actions,
-            rewards, next states and done variables.
-        """
-        # If we try to sample more elements that what are available from the
-        # buffer we raise an error
-        if n > len(self.buffer):
-            raise IndexError('Tried to sample too many elements from the buffer!')
-
-        # Sample without replacement the indices of the experiences
-        # np.random.choice takes 3 parameters: number of elements of the buffer,
-        # number of elements to sample and replacement.
-        indices = np.random.choice(
-            len(self.buffer),
-            size=n,
-            replace=False
-        )
-
-        # Using the indices that we just sampled build a list of chosen experiences
-        batch = [self.buffer[i] for i in indices]
-
-        # batch is a list of size n, where each element is an Experience tuple
-        # of 5 elements. To convert a list of tuples into
-        # a tuple of list we do zip(*batch). In this case this will return a
-        # tuple of 5 elements where each element is a list of n elements.
-        return zip(*batch)
 
 
 # Import and initialize the discrete Lunar Laner Environment
@@ -89,95 +43,150 @@ env = gym.make('LunarLander-v2')
 env.reset()
 
 # Parameters
-N_episodes = 500  # Number of episodes
-discount_factor = 0.99  # Value of the discount factor
-n_ep_running_average = 50  # Running average of 50 episodes
-n_actions = env.action_space.n  # Number of available actions
+n_episodes = 300                             # Number of episodes
+discount_factor = 0.95                       # Value of the discount factor
+n_ep_running_average = 50                    # Running average of 50 episodes
+n_actions = env.action_space.n               # Number of available actions
 dim_state = len(env.observation_space.high)  # State dimensionality
-epsilonMin = 0.1
-epsilonMax = 0.99
-C = 500  # target network frequency update
-batchNumber = 64
-lr = 0.0003
-maximum_length = 10000
-Experience = namedtuple('Experience', ['state', 'action', 'reward', 'next_state', 'done'])
 
 # We will use these variables to compute the average episodic reward and
 # the average number of steps per episode
-episode_reward_list = []  # this list contains the total reward per episode
-episode_number_of_steps = []  # this list contains the number of steps per episode
+episode_reward_list = []       # this list contains the total reward per episode
+episode_number_of_steps = []   # this list contains the number of steps per episode
 
 # Random agent initialization
-agent = RandomAgent(dim_state, n_actions)
+# agent = RandomAgent(n_actions)
+print(env.observation_space)
+print(env.observation_space.high)
+print(dim_state)
+print(n_actions)
+hidden_size = 128
 
-mainNet = Agent(dim_state, n_actions)
-targetNet = Agent(dim_state, n_actions)
+def DQN(hidden_size):
+    return nn.Sequential(
+        nn.Linear(dim_state, hidden_size),
+        nn.ReLU(),
+        nn.Linear(hidden_size, hidden_size),
+        nn.ReLU(),
+        nn.Linear(hidden_size, hidden_size),
+        nn.ReLU(),
+        nn.Linear(hidden_size, n_actions)
+    )
 
-### Create optimizer ###
-optimizer = optim.Adam(mainNet.parameters(), lr)
 
-### Training process
+Transition = namedtuple('Transition',
+                        ('state', 'action', 'next_state', 'reward', 'done'))
 
-# trange is an alternative to range in python, from the tqdm library
-# It shows a nice progression bar that you can update with useful information
-EPISODES = trange(N_episodes, desc='Episode: ', leave=True)
 
-### Create Experience replay buffer ###
-buffer = ExperienceReplayBuffer(maximum_length)
+class ReplayMemory(object):
 
-for i in EPISODES:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.memory = []
+        self.position = 0
+
+    def push(self, *args):
+        """Saves a transition."""
+        if len(self.memory) < self.capacity:
+            self.memory.append(None)
+        self.memory[self.position] = Transition(*args)
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+
+    def __len__(self):
+        return len(self.memory)
+
+EPISODES = trange(n_episodes, desc='Episode: ', leave=True)
+render_period = 150
+
+loss_fn = torch.nn.MSELoss()
+
+policy_net = DQN(hidden_size)
+target_net = DQN(hidden_size)
+target_net.load_state_dict(policy_net.state_dict())
+target_net.eval()
+
+agent = EpsGreedyAgent(n_actions, n_episodes, policy_net)
+
+BATCH_SIZE = 128
+BUFFER_SIZE = 20000
+TARGET_UPDATE = BUFFER_SIZE // BATCH_SIZE
+LEARNING_RATE = 2e-04
+
+memory = ReplayMemory(BUFFER_SIZE)
+optimizer = torch.optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
+t = 0
+for episode in EPISODES:
     # Reset enviroment data and initialize variables
     done = False
-    state = env.reset()
+    state = torch.from_numpy(env.reset())
     total_episode_reward = 0.
-    #epsilon = epsilonMax * (epsilonMin / epsilonMax) ** (i / (N_episodes - 1))
-    epsilon = epsilonMax + (epsilonMin - epsilonMax) * (i / (N_episodes - 1))
-    #epsilon = 0.01
-    t = 0
-    flag = 0
     while not done:
-        if np.random.binomial(1, epsilon):
-            # Take a random action
-            action = agent.forward(state)
-        else:
-            # Create state tensor, remember to use single precision (torch.float32)
-            state_tensor = torch.tensor([state],
-                                        requires_grad=False,
-                                        dtype=torch.float32)
+        if episode % render_period == 0:
+            env.render()
 
-            # Compute output of the network
-            values = mainNet(state_tensor)
+        # Take action
+        action = agent.forward(state, episode)
 
-            # Pick the action with greatest value
-            # .max(1) picks the action with maximum value along the first dimension
-            # [1] picks the argmax
-            # .item() is used to cast the tensor to a real value
-            action = values.max(1)[1].item()
+        next_state, reward, done, _ = env.step(action.numpy()[0][0])
+        next_state = torch.from_numpy(next_state)
 
-        # Get next state and reward.  The done variable
-        # will be True if you reached the goal position,
-        # False otherwise
-        next_state, reward, done, _ = env.step(action)
+        # Store the transition in memory
+        memory.push(state,
+            action, next_state, torch.tensor([reward], dtype=torch.float), done)
 
-        # Append experience to the buffer
-        exp = Experience(state, action, reward, next_state, done)
-        buffer.append(exp)
-
-        # Update episode reward
         total_episode_reward += reward
 
         # Update state for next iteration
         state = next_state
         t += 1
+        # Filling up buffer
+        if len(memory) < BATCH_SIZE*4:
+            continue
+        transitions = memory.sample(BATCH_SIZE)
+        batch = Transition(*zip(*transitions))
 
-        if len(buffer) >= batchNumber:
-            mainNet.backward(buffer, optimizer, targetNet, discount_factor, batchNumber)
+        # Compute a mask of non-final states and concatenate the batch elements
+        # (a final state would've been the one after which simulation ended)
+        non_final_mask = torch.logical_not(torch.tensor(batch.done))
+        next_state_batch = torch.cat(batch.next_state).reshape((BATCH_SIZE, -1))
+        state_batch = torch.cat(batch.state).reshape((BATCH_SIZE, -1))
+        action_batch = torch.cat(batch.action).reshape((BATCH_SIZE, -1))
+        reward_batch = torch.cat(batch.reward).reshape((BATCH_SIZE, -1))
 
-        if (t > C) and (flag == 0):
-            targetNet = deepcopy(mainNet)
-            flag = 1
+        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
+        # columns of actions taken. These are the actions which would've been taken
+        # for each batch state according to policy_net
+        state_action_values = policy_net(state_batch).gather(1, action_batch)
 
+        # Compute V(s_{t+1}) for all next states.
+        # Expected values of actions for non_final_next_states are computed based
+        # on the "older" target_net; selecting their best reward with max(1).values.
+        # This is merged based on the mask, such that we'll have either the expected
+        # state value or 0 in case the state was final.
+        next_state_values = torch.zeros(BATCH_SIZE)
+        next_state_pred = target_net(
+            next_state_batch).max(1).values
+        next_state_values[non_final_mask] = next_state_pred[non_final_mask]
+        # Compute the expected Q values
+        expected_state_action_values = (
+            next_state_values * discount_factor) + reward_batch.squeeze()
 
+        loss = loss_fn(
+            state_action_values, expected_state_action_values.unsqueeze(1))
+
+        optimizer.zero_grad()
+
+        loss.backward()
+        torch.nn.utils.clip_grad_norm(policy_net.parameters(), 1)
+
+        optimizer.step()
+
+        # Update the target network, copying all weights and biases in DQN
+        if t % TARGET_UPDATE == 0:
+            target_net.load_state_dict(policy_net.state_dict())
 
     # Append episode reward and total number of steps
     episode_reward_list.append(total_episode_reward)
@@ -191,14 +200,21 @@ for i in EPISODES:
     # of the last episode, average reward, average number of steps)
     EPISODES.set_description(
         "Episode {} - Reward/Steps: {:.1f}/{} - Avg. Reward/Steps: {:.1f}/{}".format(
-            i, total_episode_reward, t,
+            episode, total_episode_reward, t,
             running_average(episode_reward_list, n_ep_running_average)[-1],
             running_average(episode_number_of_steps, n_ep_running_average)[-1]))
 
+    if running_average(episode_reward_list, n_ep_running_average)[-1] > 51:
+        print("Good enough! Stopping learning")
+        break
+
+torch.save(policy_net, 'neural-network-1.pth')
+
 # Plot Rewards and steps
 fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(16, 9))
-ax[0].plot([i for i in range(1, N_episodes + 1)], episode_reward_list, label='Episode reward')
-ax[0].plot([i for i in range(1, N_episodes + 1)], running_average(
+ax[0].plot([i for i in range(1, n_episodes+1)],
+           episode_reward_list, label='Episode reward')
+ax[0].plot([i for i in range(1, n_episodes+1)], running_average(
     episode_reward_list, n_ep_running_average), label='Avg. episode reward')
 ax[0].set_xlabel('Episodes')
 ax[0].set_ylabel('Total reward')
@@ -206,8 +222,9 @@ ax[0].set_title('Total Reward vs Episodes')
 ax[0].legend()
 ax[0].grid(alpha=0.3)
 
-ax[1].plot([i for i in range(1, N_episodes + 1)], episode_number_of_steps, label='Steps per episode')
-ax[1].plot([i for i in range(1, N_episodes + 1)], running_average(
+ax[1].plot([i for i in range(1, n_episodes+1)],
+           episode_number_of_steps, label='Steps per episode')
+ax[1].plot([i for i in range(1, n_episodes+1)], running_average(
     episode_number_of_steps, n_ep_running_average), label='Avg. number of steps per episode')
 ax[1].set_xlabel('Episodes')
 ax[1].set_ylabel('Total number of steps')
@@ -216,4 +233,22 @@ ax[1].legend()
 ax[1].grid(alpha=0.3)
 plt.show()
 
-torch.save(mainNet, 'neural-network-1.pth')
+# (f)
+
+angles = np.arange(-np.pi, np.pi, 0.1)
+heights = np.arange(0, 1.5, 0.05)
+q_values = np.zeros((len(heights), len(angles)))
+
+for i, angle in enumerate(angles):
+    for j, height in enumerate(heights):
+        state = torch.tensor((0, height, 0, 0, angle, 0, 0, 0))
+        net_input = torch.unsqueeze(state, 0)
+        action_value = policy_net(net_input).max(1).values[0]
+        q_values[j, i] = action_value
+
+fig = plt.figure()
+ax = fig.gca(projection='3d')
+
+X, Y = np.meshgrid(angles, heights)
+surf = ax.plot_surface(X, Y, q_values, cmap=cm.coolwarm, linewidth=0, antialiased=False)
+plt.show()
